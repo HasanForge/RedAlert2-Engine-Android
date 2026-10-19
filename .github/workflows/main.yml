@@ -1,9 +1,8 @@
 name: Android APK (engine only)
 
-# Builds the Android app from StillM8/RedAlert2-Engine without the Windows,
-# macOS and Linux jobs. No game files are included in the APK: import your own
-# in the app. Steps mirror the repo's own .github/workflows/release.yml
-# (android job), but build the debug variant, which Gradle signs automatically.
+# Builds the Android app from StillM8/RedAlert2-Engine.
+# No Red Alert 2 game files are included in the APK.
+# The user must import compatible game files into the app.
 
 on:
   workflow_dispatch:
@@ -25,74 +24,111 @@ jobs:
     name: Build debug APK
     runs-on: ubuntu-22.04
     timeout-minutes: 40
+
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout source
+        uses: actions/checkout@v4
         with:
           ref: ${{ inputs.source_ref }}
 
-      - uses: oven-sh/setup-bun@v2
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
         with:
           bun-version: ${{ env.BUN_VERSION }}
 
       - name: Build the web engine
         working-directory: redalert2
         run: |
+          set -euo pipefail
           bun install --frozen-lockfile
           bun run build
 
-      - uses: actions/setup-java@v4
+      - name: Set up Java
+        uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: "17"
 
-      - uses: android-actions/setup-android@v4
+      # Use v4: v3 attempts to install the obsolete Android SDK "tools" package.
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v4
 
-      - name: Install Android SDK components
-        run: sdkmanager "platforms;android-36" "build-tools;36.0.0" "platform-tools"
-
-      - uses: gradle/actions/setup-gradle@v4
-        with:
-          gradle-version: 8.10.2
-
-      - name: Stage the web engine into the Android app (no game files)
+      - name: Verify Android SDK setup
         run: |
           set -euo pipefail
+          echo "Android SDK: ${ANDROID_HOME:-not set}"
+          echo "sdkmanager location:"
+          command -v sdkmanager
+          echo "Installed SDK packages:"
+          sdkmanager --list_installed
+
+      - name: Install Android SDK components
+        run: |
+          set -euo pipefail
+          sdkmanager \
+            "platforms;android-36" \
+            "build-tools;36.0.0" \
+            "platform-tools"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.10.2"
+
+      - name: Stage the web engine into the Android app
+        run: |
+          set -euo pipefail
+
           rm -rf android/app/src/main/assets/WebDist
           mkdir -p android/app/src/main/assets
+
           cp -R redalert2/dist android/app/src/main/assets/WebDist
+
           rm -rf android/app/src/main/assets/GameRes
           mkdir -p android/app/src/main/assets/GameRes
 
       - name: Assemble debug APK
         working-directory: android
-        run: gradle --no-daemon :app:assembleDebug
+        run: |
+          set -euo pipefail
+          gradle --no-daemon :app:assembleDebug
 
       - name: Collect APK
         run: |
           set -euo pipefail
-          mkdir -p out
-          cp android/app/build/outputs/apk/debug/app-debug.apk out/open-rts-engine-debug.apk
-          ls -l out
-          sha256sum out/*.apk
 
-      - uses: actions/upload-artifact@v4
+          mkdir -p out
+
+          cp \
+            android/app/build/outputs/apk/debug/app-debug.apk \
+            out/open-rts-engine-debug.apk
+
+          echo "APK details:"
+          ls -lh out/open-rts-engine-debug.apk
+
+          echo "APK SHA-256:"
+          sha256sum out/open-rts-engine-debug.apk
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
         with:
           name: android-apk
-          path: out/*.apk
+          path: out/open-rts-engine-debug.apk
           if-no-files-found: error
           retention-days: 30
 
-      # A release asset downloads as a plain .apk in the phone browser,
-      # without the zip that workflow artifacts come in.
-      - name: Publish as a prerelease (direct APK download)
+      # Also publish the APK as a prerelease asset for direct downloading.
+      - name: Publish prerelease
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: android-build-${{ github.run_number }}
         run: |
           set -euo pipefail
-          gh release create "$TAG" out/open-rts-engine-debug.apk \
+
+          gh release create "$TAG" \
+            out/open-rts-engine-debug.apk \
             --repo "$GITHUB_REPOSITORY" \
             --target "$(git rev-parse HEAD)" \
             --prerelease \
             --title "Android build $GITHUB_RUN_NUMBER" \
-            --notes "Engine only. No game files are included. Import your own files in the app."
+            --notes "Engine-only Android APK. No Red Alert 2 game files are included. Import compatible game files in the app."
