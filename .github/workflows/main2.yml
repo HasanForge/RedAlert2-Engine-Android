@@ -8,6 +8,7 @@ on:
         required: true
         type: string
         default: main
+
   push:
     tags:
       - "windows-x86-*"
@@ -17,6 +18,7 @@ permissions:
 
 env:
   BUN_VERSION: "1.3.10"
+  RUST_TARGET: i686-pc-windows-msvc
 
 jobs:
   windows-x86:
@@ -25,78 +27,183 @@ jobs:
     timeout-minutes: 60
 
     steps:
+      # --------------------------------------------------
+      # 1. Checkout source code
+      # --------------------------------------------------
       - name: Checkout source
         uses: actions/checkout@v4
         with:
           ref: ${{ github.event_name == 'workflow_dispatch' && inputs.source_ref || github.ref }}
 
+      # --------------------------------------------------
+      # 2. Install Bun
+      # --------------------------------------------------
       - name: Set up Bun
         uses: oven-sh/setup-bun@v2
         with:
           bun-version: ${{ env.BUN_VERSION }}
 
+      # --------------------------------------------------
+      # 3. Install Rust and the 32-bit Windows target
+      # --------------------------------------------------
       - name: Set up Rust x86 target
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: i686-pc-windows-msvc
 
-      - name: Build web engine
+      # --------------------------------------------------
+      # 4. Build the web engine
+      # --------------------------------------------------
+      - name: Install dependencies and build web engine
         working-directory: redalert2
         shell: pwsh
         run: |
+          $ErrorActionPreference = "Stop"
+
           bun install --frozen-lockfile
+
+          if ($LASTEXITCODE -ne 0) {
+            throw "Bun dependency installation failed."
+          }
+
           bun run build
 
+          if ($LASTEXITCODE -ne 0) {
+            throw "Web engine build failed."
+          }
+
+      # --------------------------------------------------
+      # 5. Compile the Windows x86 application
+      # --------------------------------------------------
       - name: Compile Windows x86
         working-directory: redalert2
         shell: pwsh
         run: |
+          $ErrorActionPreference = "Stop"
+
           bun run tauri:build -- --target i686-pc-windows-msvc --no-bundle
 
+          if ($LASTEXITCODE -ne 0) {
+            throw "Windows x86 compilation failed."
+          }
+
+      # --------------------------------------------------
+      # 6. Find and package the executable
+      # --------------------------------------------------
       - name: Package executable
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
 
-          $exe = Get-ChildItem redalert2 -Recurse -File -Filter *.exe |
-            Where-Object {
-              $_.FullName -match 'target\\i686-pc-windows-msvc\\release\\[^\\]+\.exe$'
-            } |
-            Select-Object -First 1
+          $possibleDirs = @(
+            "redalert2/src-tauri/target/i686-pc-windows-msvc/release",
+            "redalert2/target/i686-pc-windows-msvc/release"
+          )
 
-          if (-not $exe) {
-            Get-ChildItem redalert2 -Recurse -File -Filter *.exe |
-              Select-Object -ExpandProperty FullName
-            throw "Windows x86 executable not found."
+          $releaseDir = $null
+
+          foreach ($dir in $possibleDirs) {
+            if (Test-Path $dir) {
+              $releaseDir = $dir
+              break
+            }
           }
 
-          New-Item -ItemType Directory -Force out | Out-Null
+          if (-not $releaseDir) {
+            Write-Host "Searching for compiled Windows executables..."
 
+            Get-ChildItem "redalert2" -Recurse -File -Filter "*.exe" |
+              Select-Object -ExpandProperty FullName
+
+            throw "Rust release directory not found."
+          }
+
+          Write-Host "Release directory: $releaseDir"
+
+          $executables = @(
+            Get-ChildItem $releaseDir -Filter "*.exe" -File |
+              Where-Object {
+                $_.Name -notmatch '^(build-script|uninstall)'
+              }
+          )
+
+          if ($executables.Count -eq 0) {
+            Get-ChildItem "redalert2" -Recurse -File -Filter "*.exe" |
+              Select-Object -ExpandProperty FullName
+
+            throw "No executable found in the release directory."
+          }
+
+          Write-Host "Available executables:"
+
+          $executables |
+            Select-Object Name, Length |
+            Format-Table -AutoSize
+
+          # Use the first executable found.
+          # If the project creates multiple application executables,
+          # update this selection to identify the correct one.
+          $exe = $executables[0]
+
+          # Prepare output directory.
+          New-Item -ItemType Directory -Force "out" | Out-Null
+
+          # Copy executable using a stable filename.
           Copy-Item $exe.FullName `
-            out/RedAlert2-Engine-Windows-x86.exe
+            "out/RedAlert2-Engine-Windows-x86.exe"
 
+          # Create README.
           @"
           Red Alert 2 Engine - Windows x86 (32-bit)
+          ==========================================
 
-          Game files are not included.
-          Import your own legally obtained game files.
-          "@ | Set-Content out/README.txt
+          Architecture:
+          Windows 32-bit (x86)
 
+          Important:
+          - This is an experimental build.
+          - Original Red Alert 2 game files are not included.
+          - You must provide your own legally obtained game files.
+          - This package contains the compiled executable only.
+          - Additional runtime dependencies may be required.
+
+          If the application fails to start, check the GitHub Actions
+          build logs and the project's runtime requirements.
+          "@ | Set-Content "out/README.txt" -Encoding UTF8
+
+          # Package the executable and README.
           Compress-Archive `
-            -Path out/RedAlert2-Engine-Windows-x86.exe,out/README.txt `
-            -DestinationPath out/RedAlert2-Engine-Windows-x86.zip `
+            -Path "out/RedAlert2-Engine-Windows-x86.exe", "out/README.txt" `
+            -DestinationPath "out/RedAlert2-Engine-Windows-x86.zip" `
             -Force
 
-          Get-FileHash out/RedAlert2-Engine-Windows-x86.zip -Algorithm SHA256
+          # Generate SHA-256 checksum.
+          $hash = Get-FileHash `
+            "out/RedAlert2-Engine-Windows-x86.zip" `
+            -Algorithm SHA256
 
+          Write-Host "SHA-256:"
+          Write-Host $hash.Hash
+
+          $hash.Hash |
+            Set-Content "out/RedAlert2-Engine-Windows-x86.zip.sha256.txt"
+
+      # --------------------------------------------------
+      # 7. Upload the ZIP as a GitHub Actions artifact
+      # --------------------------------------------------
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
-          name: windows-x86
-          path: out/RedAlert2-Engine-Windows-x86.zip
+          name: RedAlert2-Engine-Windows-x86
+          path: |
+            out/RedAlert2-Engine-Windows-x86.zip
+            out/RedAlert2-Engine-Windows-x86.zip.sha256.txt
           if-no-files-found: error
           retention-days: 30
 
+      # --------------------------------------------------
+      # 8. Publish a GitHub prerelease
+      # --------------------------------------------------
       - name: Publish GitHub Release
         shell: pwsh
         env:
@@ -104,20 +211,41 @@ jobs:
           EVENT_NAME: ${{ github.event_name }}
           REF_NAME: ${{ github.ref_name }}
           RUN_NUMBER: ${{ github.run_number }}
+          REPOSITORY: ${{ github.repository }}
         run: |
           $ErrorActionPreference = "Stop"
 
-          if ($env:EVENT_NAME -eq "push" -and
-              $env:REF_NAME -like "windows-x86-*") {
+          # Use the pushed tag when triggered by a matching tag.
+          if (
+            $env:EVENT_NAME -eq "push" -and
+            $env:REF_NAME -like "windows-x86-*"
+          ) {
             $tag = $env:REF_NAME
           } else {
             $tag = "windows-x86-build-$env:RUN_NUMBER"
           }
 
+          Write-Host "Release tag: $tag"
+
+          # Check whether this release tag already exists.
+          gh release view $tag --repo $env:REPOSITORY 2>$null
+
+          if ($LASTEXITCODE -eq 0) {
+            throw "Release '$tag' already exists. Use a new tag or run number."
+          }
+
+          # Create the prerelease and upload the ZIP and checksum.
           gh release create $tag `
-            out/RedAlert2-Engine-Windows-x86.zip `
-            --repo $env:GITHUB_REPOSITORY `
+            "out/RedAlert2-Engine-Windows-x86.zip" `
+            "out/RedAlert2-Engine-Windows-x86.zip.sha256.txt" `
+            --repo $env:REPOSITORY `
             --target (git rev-parse HEAD) `
             --prerelease `
-            --title "Windows x86 build $env:RUN_NUMBER" `
-            --notes "Experimental 32-bit Windows build. Game files are not included."
+            --title "Red Alert 2 Engine - Windows x86 build $env:RUN_NUMBER" `
+            --notes "Experimental Windows 32-bit x86 build.
+
+          The original Red Alert 2 game files are not included.
+          Provide your own legally obtained game files.
+
+          This build is experimental and may have missing dependencies
+          or compatibility issues."
