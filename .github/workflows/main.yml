@@ -14,6 +14,7 @@ jobs:
 
     env:
       RUST_TARGET: i686-win7-windows-msvc
+      RUSTUP_TOOLCHAIN: nightly
 
     steps:
       # 1. Download the repository
@@ -26,27 +27,33 @@ jobs:
         with:
           bun-version: "1.3.10"
 
-      # 3. Install Nightly Rust and Rust source code
+      # 3. Install nightly Rust and its source code
       - name: Set up Nightly Rust
         uses: dtolnay/rust-toolchain@nightly
         with:
           components: rust-src
 
-      # 4. Display compiler information
-      - name: Check build environment
+      # 4. Verify the target exists in the Rust compiler
+      - name: Check Rust toolchain
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
 
-          Write-Host "========== Rust =========="
+          Write-Host "========== Rust version =========="
           rustc --version
           cargo --version
 
-          Write-Host "========== Target =========="
-          rustc --print target-list |
-            Select-String -SimpleMatch "i686-win7-windows-msvc"
+          Write-Host "========== Checking Windows 7 target =========="
 
-          Write-Host "========== Installed components =========="
+          $targets = rustc --print target-list
+
+          if ($targets -notcontains $env:RUST_TARGET) {
+            throw "The Rust compiler does not recognize target $env:RUST_TARGET"
+          }
+
+          Write-Host "Target recognized: $env:RUST_TARGET"
+
+          Write-Host "========== Installed Rust components =========="
           rustup component list --installed
 
       # 5. Install frontend dependencies
@@ -67,83 +74,95 @@ jobs:
 
           bun run build
 
-      # 7. Configure Cargo to compile the Windows 7 standard library
-      - name: Configure Cargo for Windows 7
-        working-directory: redalert2
+      # 7. Configure Cargo to build the Windows 7 standard library
+      - name: Configure Cargo
+        working-directory: redalert2/src-tauri
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
 
-          $configDir = "src-tauri/.cargo"
-          $configFile = "$configDir/config.toml"
-
-          New-Item -ItemType Directory -Force $configDir |
+          New-Item -ItemType Directory -Force ".cargo" |
             Out-Null
 
           @'
           [unstable]
           build-std = ["std", "panic_unwind"]
-          '@ | Set-Content -Path $configFile -Encoding utf8
+          '@ | Set-Content `
+              -Path ".cargo/config.toml" `
+              -Encoding utf8
 
           Write-Host "========== Cargo configuration =========="
-          Get-Content $configFile
+          Get-Content ".cargo/config.toml"
 
-          if (!(Test-Path $configFile)) {
-            throw "Cargo configuration file was not created."
-          }
-
-      # 8. Build the Windows 7 x86 application
+      # 8. Build the application directly through Cargo
+      # This bypasses Tauri CLI's target validation.
       - name: Build Windows 7 x86 application
-        working-directory: redalert2
+        working-directory: redalert2/src-tauri
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
 
-          $target = "i686-win7-windows-msvc"
+          Write-Host "========== Building application =========="
+          Write-Host "Target: $env:RUST_TARGET"
+          Write-Host "Toolchain: $env:RUSTUP_TOOLCHAIN"
 
-          Write-Host "Building target: $target"
-          Write-Host "Using Nightly Rust and build-std configuration."
+          cargo build `
+            --locked `
+            --release `
+            --target $env:RUST_TARGET
 
-          bun run tauri:build -- --target $target --no-bundle
+          if ($LASTEXITCODE -ne 0) {
+            throw "Cargo build failed with exit code $LASTEXITCODE"
+          }
 
-      # 9. Collect the generated executable and related files
+      # 9. Collect the executable and related files
       - name: Collect build output
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
 
-          $releaseDir = "redalert2/src-tauri/target/i686-win7-windows-msvc/release"
+          $releaseDir = "redalert2/src-tauri/target/$env:RUST_TARGET/release"
           $outDir = "out"
 
-          Write-Host "========== Checking build output =========="
+          Write-Host "========== Locating output =========="
 
           if (!(Test-Path $releaseDir)) {
             throw "Release directory not found: $releaseDir"
           }
 
-          $exes = Get-ChildItem $releaseDir -Filter "*.exe" -File
+          $exes = @(
+            Get-ChildItem -Path $releaseDir -Filter "*.exe" -File
+          )
 
-          if (!$exes) {
+          if ($exes.Count -eq 0) {
             throw "No executable was produced in $releaseDir"
           }
 
           New-Item -ItemType Directory -Force $outDir |
             Out-Null
 
-          Copy-Item "$releaseDir/*" $outDir -Recurse -Force
+          # Copy executables and any DLL/PDB files in the release root.
+          $files = Get-ChildItem -Path $releaseDir -File |
+            Where-Object {
+              $_.Extension -in @(".exe", ".dll", ".pdb")
+            }
+
+          foreach ($file in $files) {
+            Copy-Item $file.FullName $outDir -Force
+          }
 
           Write-Host "========== Executables =========="
 
-          Get-ChildItem $outDir -Filter "*.exe" -File |
+          Get-ChildItem -Path $outDir -Filter "*.exe" -File |
             Select-Object Name, Length
 
-          Write-Host "========== All collected files =========="
+          Write-Host "========== Collected files =========="
 
-          Get-ChildItem $outDir -Recurse -File |
-            Select-Object FullName, Length
+          Get-ChildItem -Path $outDir -File |
+            Select-Object Name, Length
 
-      # 10. Upload the result to GitHub Actions
-      - name: Upload build artifacts
+      # 10. Upload the generated files
+      - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
           name: RedAlert2-Windows7-SP1-x86
