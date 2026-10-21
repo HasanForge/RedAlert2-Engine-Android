@@ -8,71 +8,118 @@ permissions:
 
 jobs:
   build:
-    name: Build 32-bit Windows 7 executable
+    name: Build Windows 7 SP1 32-bit application
     runs-on: windows-latest
     timeout-minutes: 120
 
     env:
       RUST_TARGET: i686-win7-windows-msvc
-      CARGO_UNSTABLE_BUILD_STD: "std,panic_unwind"
 
     steps:
+      # 1. Download the repository
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      # 2. Install Bun
       - name: Set up Bun
         uses: oven-sh/setup-bun@v2
         with:
           bun-version: "1.3.10"
 
-      - name: Set up nightly Rust
+      # 3. Install Nightly Rust and Rust source code
+      - name: Set up Nightly Rust
         uses: dtolnay/rust-toolchain@nightly
         with:
           components: rust-src
 
-      - name: Display toolchain information
+      # 4. Display compiler information
+      - name: Check build environment
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
+
+          Write-Host "========== Rust =========="
           rustc --version
           cargo --version
-          rustc --print target-list | Select-String "i686-win7"
 
+          Write-Host "========== Target =========="
+          rustc --print target-list |
+            Select-String -SimpleMatch "i686-win7-windows-msvc"
+
+          Write-Host "========== Installed components =========="
+          rustup component list --installed
+
+      # 5. Install frontend dependencies
       - name: Install frontend dependencies
         working-directory: redalert2
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
+
           bun install --frozen-lockfile
 
+      # 6. Build the frontend
       - name: Build frontend
         working-directory: redalert2
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
+
           bun run build
 
+      # 7. Configure Cargo to compile the Windows 7 standard library
+      - name: Configure Cargo for Windows 7
+        working-directory: redalert2
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          $configDir = "src-tauri/.cargo"
+          $configFile = "$configDir/config.toml"
+
+          New-Item -ItemType Directory -Force $configDir |
+            Out-Null
+
+          @'
+          [unstable]
+          build-std = ["std", "panic_unwind"]
+          '@ | Set-Content -Path $configFile -Encoding utf8
+
+          Write-Host "========== Cargo configuration =========="
+          Get-Content $configFile
+
+          if (!(Test-Path $configFile)) {
+            throw "Cargo configuration file was not created."
+          }
+
+      # 8. Build the Windows 7 x86 application
       - name: Build Windows 7 x86 application
         working-directory: redalert2
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
 
-          bun run tauri:build -- --target i686-win7-windows-msvc --no-bundle
+          $target = "i686-win7-windows-msvc"
 
+          Write-Host "Building target: $target"
+          Write-Host "Using Nightly Rust and build-std configuration."
+
+          bun run tauri:build -- --target $target --no-bundle
+
+      # 9. Collect the generated executable and related files
       - name: Collect build output
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
 
           $releaseDir = "redalert2/src-tauri/target/i686-win7-windows-msvc/release"
+          $outDir = "out"
+
+          Write-Host "========== Checking build output =========="
 
           if (!(Test-Path $releaseDir)) {
             throw "Release directory not found: $releaseDir"
           }
-
-          $outDir = "out"
-          New-Item -ItemType Directory -Force $outDir | Out-Null
 
           $exes = Get-ChildItem $releaseDir -Filter "*.exe" -File
 
@@ -80,16 +127,22 @@ jobs:
             throw "No executable was produced in $releaseDir"
           }
 
+          New-Item -ItemType Directory -Force $outDir |
+            Out-Null
+
           Copy-Item "$releaseDir/*" $outDir -Recurse -Force
 
-          Write-Host "Executables:"
+          Write-Host "========== Executables =========="
+
           Get-ChildItem $outDir -Filter "*.exe" -File |
             Select-Object Name, Length
 
-          Write-Host "Collected files:"
+          Write-Host "========== All collected files =========="
+
           Get-ChildItem $outDir -Recurse -File |
             Select-Object FullName, Length
 
+      # 10. Upload the result to GitHub Actions
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
