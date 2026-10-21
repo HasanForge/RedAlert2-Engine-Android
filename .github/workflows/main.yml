@@ -1,0 +1,327 @@
+name: Windows 7 32-bit (Electron 22)
+
+# Builds a portable Windows 7 SP1 / 32-bit (ia32) package of the web engine.
+#
+# Why Electron 22: it is the last Electron release that supports Windows 7, 8
+# and 8.1 (Chromium 108). The Tauri build needs WebView2 and a Rust target that
+# no longer run on Windows 7.
+#
+# Everything runs on a Linux runner, so no Windows checkout is involved (a repo
+# containing a path with a trailing space, such as ".github /workflow/...",
+# cannot be checked out on Windows). Electron's official ia32 zip is downloaded,
+# checked against Electron's published SHA-256, and the built web app is placed
+# inside it. No game files are included: import your own in the app.
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_ref:
+        description: Branch, tag or SHA of the engine to build
+        required: true
+        type: string
+        default: main
+      electron_version:
+        description: Electron version (22.3.27 is the last 22.x release)
+        required: true
+        type: string
+        default: "22.3.27"
+
+permissions:
+  contents: write
+
+env:
+  BUN_VERSION: "1.3.10"
+  OUT: RedAlert2-Engine-Win7-ia32
+
+jobs:
+  build:
+    name: Build Windows 7 ia32 package
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout engine source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_ref }}
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+
+      # Chromium 108 is older than the engine's default build target, so build
+      # the web app for chrome105 (the same target the Tauri desktop build
+      # uses). A throwaway config file overrides only that one setting.
+      - name: Build the web engine for Chromium 108
+        working-directory: redalert2
+        run: |
+          set -euo pipefail
+          bun install --frozen-lockfile
+          cat > vite.win7.config.ts <<'VITE_EOF'
+          import { defineConfig, mergeConfig } from 'vite';
+          import baseConfig from './vite.config';
+          export default mergeConfig(baseConfig, defineConfig({ build: { target: 'chrome105' } }));
+          VITE_EOF
+          bun --bun vite build --config vite.win7.config.ts
+          test -f dist/index.html
+          du -sh dist
+
+      - name: Download and verify Electron (win32 ia32)
+        env:
+          EV: ${{ inputs.electron_version }}
+        run: |
+          set -euo pipefail
+          mkdir -p electron
+          BASE="https://github.com/electron/electron/releases/download/v${EV}"
+          curl -fL --retry 3 -o electron/electron.zip "${BASE}/electron-v${EV}-win32-ia32.zip"
+          curl -fL --retry 3 -o electron/SHASUMS256.txt "${BASE}/SHASUMS256.txt"
+          EXPECTED="$(grep -F "electron-v${EV}-win32-ia32.zip" electron/SHASUMS256.txt | head -n 1 | cut -d' ' -f1)"
+          ACTUAL="$(sha256sum electron/electron.zip | cut -d' ' -f1)"
+          echo "expected: $EXPECTED"
+          echo "actual:   $ACTUAL"
+          test -n "$EXPECTED"
+          test "$EXPECTED" = "$ACTUAL"
+
+      - name: Assemble the portable app
+        run: |
+          set -euo pipefail
+          mkdir -p "$OUT"
+          unzip -q electron/electron.zip -d "$OUT"
+          mv "$OUT/electron.exe" "$OUT/RedAlert2-Engine.exe"
+          rm -f "$OUT/resources/default_app.asar"
+          mkdir -p "$OUT/resources/app"
+          cp -R redalert2/dist "$OUT/resources/app/dist"
+
+          cat > "$OUT/resources/app/package.json" <<'PKG_EOF'
+          {
+            "name": "redalert2-engine-win7",
+            "productName": "Red Alert 2 Engine",
+            "version": "0.1.0",
+            "main": "main.js"
+          }
+          PKG_EOF
+
+          cat > "$OUT/resources/app/main.js" <<'MAIN_EOF'
+          'use strict';
+          const { app, BrowserWindow, Menu } = require('electron');
+          const http = require('http');
+          const fs = require('fs');
+          const path = require('path');
+
+          // Fixed port: the browser storage that holds the imported game files
+          // belongs to the origin http://127.0.0.1:PORT, so it must not change.
+          const PORT = 47231;
+          const ROOT = path.join(__dirname, 'dist');
+
+          // Keep all data (imported game files, settings, log) next to the exe.
+          try {
+            const dataDir = path.join(path.dirname(process.execPath), 'data');
+            fs.mkdirSync(dataDir, { recursive: true });
+            app.setPath('userData', dataDir);
+          } catch (e) { /* fall back to the default profile folder */ }
+
+          // Old graphics cards and drivers are on Chromium's blocklist, which
+          // forces slow software WebGL. Ask for hardware WebGL anyway.
+          app.commandLine.appendSwitch('ignore-gpu-blocklist');
+
+          const LOG = path.join(app.getPath('userData'), 'ra2-engine.log');
+          function log() {
+            try {
+              const text = Array.prototype.slice.call(arguments).join(' ');
+              fs.appendFileSync(LOG, new Date().toISOString() + ' ' + text + '\n');
+            } catch (e) { /* ignore */ }
+          }
+          process.on('uncaughtException', function (e) { log('[uncaughtException]', e && e.stack || e); });
+
+          const MIME = {
+            '.html': 'text/html; charset=utf-8',
+            '.js': 'text/javascript; charset=utf-8',
+            '.mjs': 'text/javascript; charset=utf-8',
+            '.css': 'text/css; charset=utf-8',
+            '.json': 'application/json; charset=utf-8',
+            '.map': 'application/json; charset=utf-8',
+            '.txt': 'text/plain; charset=utf-8',
+            '.wasm': 'application/wasm',
+            '.png': 'image/png',
+            '.jpg': 'image/jpeg',
+            '.jpeg': 'image/jpeg',
+            '.gif': 'image/gif',
+            '.webp': 'image/webp',
+            '.svg': 'image/svg+xml',
+            '.ico': 'image/x-icon',
+            '.mp3': 'audio/mpeg',
+            '.ogg': 'audio/ogg',
+            '.wav': 'audio/wav',
+            '.mp4': 'video/mp4',
+            '.webm': 'video/webm',
+            '.woff': 'font/woff',
+            '.woff2': 'font/woff2',
+            '.ttf': 'font/ttf'
+          };
+
+          // The engine uses SharedArrayBuffer, which needs these two headers.
+          const HEADERS = {
+            'Cross-Origin-Opener-Policy': 'same-origin',
+            'Cross-Origin-Embedder-Policy': 'require-corp',
+            'Cross-Origin-Resource-Policy': 'same-origin',
+            'Cache-Control': 'no-cache'
+          };
+
+          function handler(req, res) {
+            let pathname;
+            try {
+              pathname = decodeURIComponent(new URL(req.url, 'http://127.0.0.1').pathname);
+            } catch (e) {
+              res.writeHead(400, HEADERS);
+              res.end();
+              return;
+            }
+            if (pathname.endsWith('/')) pathname += 'index.html';
+            const file = path.normalize(path.join(ROOT, pathname));
+            if (file !== ROOT && file.indexOf(ROOT + path.sep) !== 0) {
+              res.writeHead(403, HEADERS);
+              res.end();
+              return;
+            }
+            fs.stat(file, function (err, st) {
+              if (err || !st.isFile()) {
+                res.writeHead(404, HEADERS);
+                res.end('Not found');
+                return;
+              }
+              res.writeHead(200, Object.assign({}, HEADERS, {
+                'Content-Type': MIME[path.extname(file).toLowerCase()] || 'application/octet-stream',
+                'Content-Length': st.size
+              }));
+              if (req.method === 'HEAD') {
+                res.end();
+                return;
+              }
+              fs.createReadStream(file).on('error', function () { res.destroy(); }).pipe(res);
+            });
+          }
+
+          function listen(port) {
+            return new Promise(function (resolve, reject) {
+              const server = http.createServer(handler);
+              server.once('error', reject);
+              server.listen(port, '127.0.0.1', function () {
+                server.on('error', function (e) { log('[server]', e.message); });
+                resolve(server.address().port);
+              });
+            });
+          }
+
+          function createWindow(port) {
+            Menu.setApplicationMenu(null);
+            const win = new BrowserWindow({
+              width: 1280,
+              height: 720,
+              show: false,
+              backgroundColor: '#000000',
+              title: 'Red Alert 2 Engine',
+              webPreferences: {
+                contextIsolation: true,
+                sandbox: true,
+                nodeIntegration: false,
+                backgroundThrottling: false
+              }
+            });
+            win.once('ready-to-show', function () { win.maximize(); win.show(); });
+            win.webContents.setWindowOpenHandler(function () { return { action: 'deny' }; });
+            win.webContents.on('console-message', function (e, level, message, line, source) {
+              if (level >= 2) log('[console]', message, '(' + source + ':' + line + ')');
+            });
+            win.webContents.on('render-process-gone', function (e, d) {
+              log('[render-process-gone]', d.reason, d.exitCode);
+            });
+            win.webContents.on('did-fail-load', function (e, code, desc, url) {
+              log('[did-fail-load]', code, desc, url);
+            });
+            // F11 = full screen, F12 = developer tools.
+            win.webContents.on('before-input-event', function (event, input) {
+              if (input.type !== 'keyDown') return;
+              if (input.key === 'F11') {
+                win.setFullScreen(!win.isFullScreen());
+                event.preventDefault();
+              } else if (input.key === 'F12') {
+                win.webContents.toggleDevTools();
+                event.preventDefault();
+              }
+            });
+            win.loadURL('http://127.0.0.1:' + port + '/');
+          }
+
+          app.whenReady().then(async function () {
+            let port;
+            try {
+              port = await listen(PORT);
+            } catch (e) {
+              log('[server] fixed port busy, using a random one (imported data will not carry over):', e.message);
+              port = await listen(0);
+            }
+            log('[start] port', port, 'electron', process.versions.electron, 'chrome', process.versions.chrome);
+            createWindow(port);
+          });
+
+          app.on('window-all-closed', function () { app.quit(); });
+          MAIN_EOF
+
+          cat > "$OUT/README.txt" <<'README_EOF'
+          Red Alert 2 Engine - Windows 7 SP1 / 32-bit (experimental)
+
+          Run RedAlert2-Engine.exe. No installation needed.
+
+          - Game files are NOT included. Import your own folder inside the app.
+          - All data (imported game files, settings) is stored in the "data" folder
+            next to the exe. Delete that folder to reset everything.
+          - F11 toggles full screen. F12 opens developer tools.
+          - If something fails, send the file data\ra2-engine.log.
+          - If the window stays black or crashes at start, open
+            resources\app\main.js in Notepad and delete the line containing
+            'ignore-gpu-blocklist', then try again.
+
+          Needs Windows 7 SP1 or newer, a CPU with SSE3, and a graphics card and
+          driver that support WebGL 2. This engine is heavy for 1 GB of RAM.
+          README_EOF
+
+      - name: Verify the package is 32-bit and complete
+        run: |
+          set -euo pipefail
+          file "$OUT/RedAlert2-Engine.exe" | tee /dev/stderr | grep -q "Intel 80386"
+          test -f "$OUT/resources/app/main.js"
+          test -f "$OUT/resources/app/dist/index.html"
+          ls -l "$OUT"
+
+      - name: Zip and checksum
+        run: |
+          set -euo pipefail
+          zip -qr "$OUT.zip" "$OUT"
+          sha256sum "$OUT.zip" | tee "$OUT.zip.sha256.txt"
+          ls -l "$OUT.zip"
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.OUT }}
+          path: |
+            ${{ env.OUT }}.zip
+            ${{ env.OUT }}.zip.sha256.txt
+          compression-level: 0
+          if-no-files-found: error
+          retention-days: 30
+
+      # A release asset downloads directly, without the extra zip that
+      # workflow artifacts are wrapped in.
+      - name: Publish as a prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: win7-ia32-build-${{ github.run_number }}
+        run: |
+          set -euo pipefail
+          gh release create "$TAG" "$OUT.zip" "$OUT.zip.sha256.txt" \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$(git rev-parse HEAD)" \
+            --prerelease \
+            --title "Windows 7 32-bit build $GITHUB_RUN_NUMBER" \
+            --notes "Experimental Electron 22 (ia32) package for Windows 7 SP1 and newer. No game files included; import your own in the app."
