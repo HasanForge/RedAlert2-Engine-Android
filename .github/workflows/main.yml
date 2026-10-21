@@ -1,0 +1,94 @@
+name: Windows 7 SP1 x86 Compatibility Build
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build 32-bit Windows 7 executable
+    runs-on: windows-latest
+    timeout-minutes: 60
+
+    env:
+      RUST_TOOLCHAIN: "1.77.2"
+      RUST_TARGET: i686-pc-windows-msvc
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.3.10"
+
+      - name: Set up Rust for compatibility testing
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.77.2"
+          targets: i686-pc-windows-msvc
+
+      - name: Display toolchain information
+        shell: pwsh
+        run: |
+          rustc --version
+          cargo --version
+          rustc --print target-list | Select-String "i686"
+
+      - name: Install frontend dependencies
+        working-directory: redalert2
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          bun install --frozen-lockfile
+
+      - name: Build frontend
+        working-directory: redalert2
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          bun run build
+
+      - name: Build 32-bit Windows application
+        working-directory: redalert2
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          bun run tauri:build -- --target i686-pc-windows-msvc --no-bundle
+
+      - name: Collect build output
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          $releaseDir = "redalert2/src-tauri/target/i686-pc-windows-msvc/release"
+
+          if (!(Test-Path $releaseDir)) {
+            throw "Release directory not found: $releaseDir"
+          }
+
+          $exes = Get-ChildItem $releaseDir -Filter "*.exe" -File
+
+          if (!$exes) {
+            throw "No executable was produced."
+          }
+
+          New-Item -ItemType Directory -Force "out" | Out-Null
+
+          Copy-Item "$releaseDir/*" "out/" -Recurse -Force
+
+          Write-Host "Build output:"
+          Get-ChildItem "out" -Recurse -File |
+            Select-Object FullName, Length
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: RedAlert2-Windows7-x86-experimental
+          path: out/
+          if-no-files-found: error
+          retention-days: 14
