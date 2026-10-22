@@ -49,6 +49,29 @@ jobs:
         with:
           bun-version: ${{ env.BUN_VERSION }}
 
+      # The engine verifies ra2.mix and multi.mix against known CRC-32 values
+      # ONLY when it runs in a plain browser. The Android app is a "native
+      # shell" and skips that check, which is why the same game files import
+      # fine on a phone but fail on PC with "File ... appears to be corrupt".
+      # Skip the check here too. This also avoids reading the ~280 MB ra2.mix
+      # into memory, which matters on a PC with 1 GB of RAM.
+      - name: Skip the mix CRC check, like the Android app does
+        run: |
+          set -euo pipefail
+          python3 - <<'PY_EOF'
+          import sys
+          path = 'redalert2/src/engine/gameRes/GameRes.ts'
+          src = open(path, encoding='utf-8').read()
+          needle = 'if (isNativeShell()) {'
+          found = src.count(needle)
+          if found != 1:
+              sys.exit('Expected exactly one %r in %s, found %d' % (needle, path, found))
+          src = src.replace(needle, 'if (true) { /* Windows 7 build: mix CRC check disabled */')
+          open(path, 'w', encoding='utf-8').write(src)
+          print('patched', path)
+          PY_EOF
+          grep -n 'mix CRC check disabled' redalert2/src/engine/gameRes/GameRes.ts
+
       # Chromium 108 is older than the engine's default build target, so build
       # the web app for chrome105 (the same target the Tauri desktop build
       # uses). A throwaway config file overrides only that one setting.
