@@ -59,6 +59,9 @@ export class MapFile extends IniFile {
     declare ionLighting: MapLighting;
     declare tags: any;
     declare triggers: any;
+    declare taskForces: Map<string, TaskForce>;
+    declare scriptTypes: Map<string, ScriptType>;
+    declare teamTypes: Map<string, TeamType>;
     declare unknownEventTypes: any;
     declare unknownActionTypes: any;
     declare cellTags: any;
@@ -106,6 +109,7 @@ export class MapFile extends IniFile {
         this.readSmudges();
         this.readLighting();
         this.readTagsAndTriggers();
+        this.readTeams();
         this.readCellTags(this.iniFormat);
         this.readVariableNames();
         this.startingLocations = this.readStartingLocations(this.waypoints);
@@ -147,6 +151,11 @@ export class MapFile extends IniFile {
         this.triggers = triggers;
         this.unknownEventTypes = unknownEventTypes;
         this.unknownActionTypes = unknownActionTypes;
+    }
+    readTeams() {
+    this.taskForces = new TaskForcesReader().read(this);
+    this.scriptTypes = new ScriptTypesReader().read(this);
+    this.teamTypes = new TeamTypesReader().read(this);
     }
     readCellTags(e: number) {
         this.cellTags = new CellTagsReader().read(this.getOrCreateSection("CellTags"), e);
